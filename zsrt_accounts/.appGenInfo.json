@@ -1,0 +1,28 @@
+{
+  "generationParameters": {
+    "generationDate": "Fri Mar 13 2026 08:05:23 GMT+0000 (Coordinated Universal Time)",
+    "generatorPlatform": "SAP Business Application Studio",
+    "serviceType": "SAP System (ABAP On-Premise)",
+    "metadataFilename": "",
+    "serviceUrl": "http://mgss81a.aws.msg.de:44300/sap/opu/odata/sap/ZRI_SB_ACC_DATA",
+    "appName": "zsrt_accounts",
+    "appTitle": "Selective Refresh Tool - Accounts",
+    "appDescription": "Selective Refresh Tool - Accounts",
+    "appNamespace": "srt.acc",
+    "ui5Theme": "sap_horizon",
+    "ui5Version": "1.120.14",
+    "enableEslint": false,
+    "enableTypeScript": false,
+    "showMockDataInfo": true,
+    "generatorVersion": "1.20.4",
+    "template": "List Report Page V2",
+    "generatorName": "SAP Fiori Application Generator",
+    "entityRelatedConfig": [
+      {
+        "type": "Main Entity",
+        "value": "Account"
+      }
+    ],
+    "launchText": "To launch the generated application, run the following from the generated application root folder:\n\n```\n    npm start\n```"
+  }
+}
