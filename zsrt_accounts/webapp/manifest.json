@@ -135,7 +135,9 @@
               }
             },
             "tableSettings": {
-              "type": "GridTable"
+              "type": "GridTable",
+              "multiSelect":true,
+              "selectAll":true
             }
           }
         },
