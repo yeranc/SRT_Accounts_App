@@ -23,6 +23,7 @@ sap.ui.define([
                     PostingNo: oData.PostingNo
                 };
 
+                //Calling the odata rap custom action 
                 oModel.callFunction("/show_res", {
                     method: "POST",
                     urlParameters: oPayload,

@@ -21,6 +21,6 @@ builder:
           name: ZSRT_ACCOUNTS
           description: Selective Refresh Tool - Accounts
           package: ZRI_SRTOOL
-          transport: T30K902473
+          transport: T30K902437
         exclude:
           - /test/
