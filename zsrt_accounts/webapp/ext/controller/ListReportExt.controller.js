@@ -6,131 +6,282 @@ sap.ui.define([
 
     return {
         get_results: function () {
-            var oModel = this.getView().getModel();
-            var aContexts = this.extensionAPI.getSelectedContexts();
-            var that = this;
+            this._aContexts = this.extensionAPI.getSelectedContexts();
 
-            var aResults = [];
-            var iCompleted = 0;
+            if (!this._aContexts.length) {
+                MessageToast.show("No rows selected.");
+                return;
+            }
+
+            this._iCurrentIndex = 0;
+            this._iBatchSize = 200; // number of rows per batch
+            this._aResults = [];
+            this._bLoading = false;
+            this._bDestroyed = false;
+            this._oTable = null;
+            this._oDialog = null;
+            this._oModel = null;
+            this._oExportButton = null;
 
             this.getView().setBusy(true);
-            for (let index = 0; index < aContexts.length; index++) {
-                var oData = aContexts[index].getObject();
+            this._loadNextBatch();
+        },
 
-                var oPayload = {
-                    AccountNumber: oData.AccountNumber,
-                    TreatyNumber: oData.TreatyNumber,
-                    PostingNo: oData.PostingNo
-                };
+        // Load data in batches (called on scroll)
+        _loadNextBatch: async function () {
+            if (this._bLoading) return;
+            if (this._bDestroyed) return;   // Stop if dialog closes
+            if (this._iCurrentIndex >= this._aContexts.length) return;
 
-                //Calling the odata rap custom action 
-                oModel.callFunction("/show_res", {
-                    method: "POST",
-                    urlParameters: oPayload,
-                    success: function (oResult) {
-                        var oResultData = oResult.results;
-                        // store result
-                        aResults.push(oResultData);
-                        iCompleted++;
+            var that = this;
+            var oModel = this.getView().getModel();
+            var start = this._iCurrentIndex;
+            var end = Math.min(start + this._iBatchSize, this._aContexts.length);
+            var aBatch = this._aContexts.slice(start, end);
 
-                        // when all calls finished
-                        if (iCompleted === aContexts.length) {
-                            that.getView().setBusy(false);
-                            that._showResultPopup(aResults);
-                        }
-                    },
+            this._bLoading = true;
 
-                    error: function () {
-                        iCompleted++;
-                        if (iCompleted === aContexts.length) {
-                            that._showResultPopup(aResults);
-                        }
-                        MessageToast.show("Error calling backend");
-                    }
-                });
+            const MAX_PARALLEL = 20;    // Number of parallel calls
+
+            // Process batch with limited parallel calls
+            async function processWithLimit(items) {
+                let results = [];
+                for (let i = 0; i < items.length; i += MAX_PARALLEL) {
+                    if (that._bDestroyed) return results;
+                    let chunk = items.slice(i, i + MAX_PARALLEL);
+
+                    // Create parallel calls for this chunk
+                    let promises = chunk.map(function (oContext) {
+                        let oData = oContext.getObject();
+                        return new Promise(function (resolve) {
+                            oModel.callFunction("/show_res", {
+                                method: "POST",
+                                urlParameters: {
+                                    AccountNumber: oData.AccountNumber,
+                                    TreatyNumber: oData.TreatyNumber,
+                                    PostingNo: oData.PostingNo
+                                },
+                                success: function (oResult) {
+                                    resolve(oResult.results || []);
+                                },
+                                error: function () {
+                                    resolve([]);
+                                }
+                            });
+                        });
+                    });
+
+                    // Wait for this chunk to finish
+                    let chunkResults = await Promise.all(promises);
+                    chunkResults.forEach(r => results.push(...r));  // Flatten results
+                }
+                return results;
+            }
+
+            try {
+                const batchResults = await processWithLimit(aBatch);
+                if (!this._bDestroyed) {
+                    this._aResults.push(...batchResults);
+                    this._iCurrentIndex = end;
+                }
+            } catch (e) {
+                MessageToast.show("Unexpected error during batch load.");
+            } finally {
+                this._bLoading = false;
+            }
+
+            if (!this._bDestroyed) {
+                this._updateTable();
+                if (this._iCurrentIndex >= this._aContexts.length) {
+                    this.getView().setBusy(false);
+                }
             }
         },
 
-        _showResultPopup: function (aData) {
-            // Flatten nested arrays
-            var aFlatData = aData.flat();
-            var sthat = this;
+        // Export full dataset
+        _startExport: async function () {
+            if (this._bDestroyed) return;
 
-            var oModel = new sap.ui.model.json.JSONModel();
-            oModel.setData({ results: aFlatData });
+            var that = this;
+            var oModel = this.getView().getModel();
+            var total = this._aContexts.length;
 
-            var oTable = new sap.m.Table({
-                columns: [
-                    new sap.m.Column({
-                        header: new sap.m.Text({ text: "Source Account Number" }),
-                        width: "40%"
-                    }),
-                    new sap.m.Column({
-                        header: new sap.m.Text({ text: "Process Ref ID" }),
-                        width: "40%"
-                    }),
-                    new sap.m.Column({
-                        header: new sap.m.Text({ text: "Target Account Number" }),
-                        width: "40%"
-                    }),
-                    new sap.m.Column({
-                        header: new sap.m.Text({ text: "Target System" }),
-                        width: "30%"
-                    }),
-                    new sap.m.Column({
-                        header: new sap.m.Text({ text: "Message Type" }),
-                        width: "30%"
-                    }),
-                    new sap.m.Column({
-                        header: new sap.m.Text({ text: "Message" }),
-                        width: "80%"
-                    })
-                ]
-            });
+            var aExportResults = this._aResults.slice();
+            var iExportIndex = this._iCurrentIndex;
 
-            oTable.setModel(oModel);
+            const EXPORT_BATCH = 500;
+            const MAX_PARALLEL = 100;
+            const PAUSE_MS = 1000;  // Pause time in ms
 
-            oTable.bindItems({
-                path: "/results",
-                template: new sap.m.ColumnListItem({
-                    cells: [
-                        new sap.m.Text({ text: "{abrnr}" }),
-                        new sap.m.Text({ text: "{processingID}" }),
-                        new sap.m.Text({ text: "{CreatedAcc}" }),
-                        new sap.m.Text({ text: "{syst}" }),
-                        new sap.m.Text({ text: "{type}" }),
-                        new sap.m.Text({ text: "{message}" })
-                    ]
-                })
-            });
+            // Disable button + set dialog busy
+            this._oExportButton.setEnabled(false);
+            this._oExportButton.setText("Fetching...");
+            this._oDialog.setBusy(true);
 
-            var oDialog = new sap.m.Dialog({
-                title: "Account Copy Logs",
-                content: [oTable],
-                buttons: [
-                    new sap.m.Button({
-                        text: "Export",
-                        type: "Emphasized",
-                        press: function () {
-                            sthat._exportToExcel(aFlatData);
-                        }
-                    }),
-                    new sap.m.Button({
-                        text: "Close",
-                        press: function () {
-                            oDialog.close();
-                        }
-                    })
-                ],
-                afterClose: function () {
-                    oDialog.destroy();
+            async function processChunk(items) {
+                let results = [];
+                for (let i = 0; i < items.length; i += MAX_PARALLEL) {
+                    if (that._bDestroyed) return results;
+                    let chunk = items.slice(i, i + MAX_PARALLEL);
+                    let promises = chunk.map(function (oContext) {
+                        let oData = oContext.getObject();
+                        return new Promise(function (resolve) {
+                            oModel.callFunction("/show_res", {
+                                method: "POST",
+                                urlParameters: {
+                                    AccountNumber: oData.AccountNumber,
+                                    TreatyNumber: oData.TreatyNumber,
+                                    PostingNo: oData.PostingNo
+                                },
+                                success: function (oResult) {
+                                    resolve(oResult.results || []);
+                                },
+                                error: function () {
+                                    resolve([]);
+                                }
+                            });
+                        });
+                    });
+                    let chunkResults = await Promise.all(promises);
+                    chunkResults.forEach(r => results.push(...r));
+                }
+                return results;
+            }
+
+            while (iExportIndex < total) {
+                if (this._bDestroyed) return;
+
+                var batchEnd = Math.min(iExportIndex + EXPORT_BATCH, total);
+                var aBatch = this._aContexts.slice(iExportIndex, batchEnd);
+
+                try {
+                    var batchResults = await processChunk(aBatch);
+                    aExportResults.push(...batchResults);
+                    iExportIndex = batchEnd;
+
+                    if (!this._bDestroyed) {
+                        var msg = iExportIndex < total
+                            ? "Fetched " + aExportResults.length + " records..."
+                            : "Fetched all " + aExportResults.length + " records. Generating Excel...";
+
+                        MessageToast.show(msg, { duration: 2000 });
+                    }
+                } catch (e) {
+                    MessageToast.show("Error during export batch.");
+                }
+
+                if (iExportIndex < total) {
+                    await new Promise(resolve => setTimeout(resolve, PAUSE_MS));
+                }
+            }
+
+            if (this._bDestroyed) return;
+
+            // Remove busy before SAP export dialog opens
+            this._oDialog.setBusy(false);
+
+            this._exportToExcel(aExportResults, function () {
+                MessageToast.show("Excel file downloaded with " + aExportResults.length + " records.", {
+                    duration: 4000
+                });
+
+                if (!that._bDestroyed && that._oExportButton) {
+                    that._oExportButton.setEnabled(true);
+                    that._oExportButton.setText("Export");
                 }
             });
-
-            oDialog.open();
         },
 
-        _exportToExcel: function (aData) {
+        _updateTable: function () {
+            if (this._bDestroyed) return;
+
+            var that = this;
+
+            if (!this._oTable) {
+                this._oModel = new sap.ui.model.json.JSONModel({ results: [] });
+
+                this._oTable = new sap.m.Table({
+                    growing: true,
+                    growingThreshold: 50,
+                    growingScrollToLoad: true,
+                    columns: [
+                        new sap.m.Column({ header: new sap.m.Text({ text: "Source Account Number" }) }),
+                        new sap.m.Column({ header: new sap.m.Text({ text: "Process Ref ID" }) }),
+                        new sap.m.Column({ header: new sap.m.Text({ text: "Target Account Number" }) }),
+                        new sap.m.Column({ header: new sap.m.Text({ text: "Target System" }) }),
+                        new sap.m.Column({ header: new sap.m.Text({ text: "Message Type" }) }),
+                        new sap.m.Column({ header: new sap.m.Text({ text: "Message" }) })
+                    ]
+                });
+
+                this._oTable.setModel(this._oModel);
+
+                this._oTable.bindItems({
+                    path: "/results",
+                    template: new sap.m.ColumnListItem({
+                        cells: [
+                            new sap.m.Text({ text: "{abrnr}" }),
+                            new sap.m.Text({ text: "{processingID}" }),
+                            new sap.m.Text({ text: "{CreatedAcc}" }),
+                            new sap.m.Text({ text: "{syst}" }),
+                            new sap.m.Text({ text: "{type}" }),
+                            new sap.m.Text({ text: "{message}" })
+                        ]
+                    })
+                });
+
+                this._oTable.attachGrowingStarted(function () {
+                    if (that._bDestroyed) return;
+                    var total = that._aContexts.length;
+                    var loaded = that._iCurrentIndex;
+                    if (loaded < total && !that._bLoading) {
+                        that._loadNextBatch();
+                    }
+                });
+
+                this._oExportButton = new sap.m.Button({
+                    text: "Export",
+                    type: "Emphasized",
+                    press: function () {
+                        that._startExport();
+                    }
+                });
+
+                this._oDialog = new sap.m.Dialog({
+                    title: "Account Copy Logs",
+                    contentWidth: "90%",
+                    contentHeight: "80%",
+                    content: [this._oTable],
+                    buttons: [
+                        this._oExportButton,
+                        new sap.m.Button({
+                            text: "Close",
+                            press: function () {
+                                that._oDialog.close();
+                            }
+                        })
+                    ],
+                    afterClose: function () {
+                        that._bDestroyed = true;
+                        that._oDialog.destroy();
+                        that._oDialog = null;
+                        that._oTable = null;
+                        that._oModel = null;
+                        that._oExportButton = null;
+                        that._aResults = [];
+                        that._iCurrentIndex = 0;
+                        that._bLoading = false;
+                        that.getView().setBusy(false);
+                    }
+                });
+
+                this._oDialog.open();
+            }
+
+            this._oModel.setProperty("/results", this._aResults);
+        },
+
+        _exportToExcel: function (aData, fnCallback) {
             var aCols = [
                 { label: "Source Account Number", property: "abrnr" },
                 { label: "Process Ref ID", property: "processingID" },
@@ -140,18 +291,19 @@ sap.ui.define([
                 { label: "Message", property: "message" }
             ];
 
-            var oSettings = {
-                workbook: {
-                    columns: aCols
-                },
+            var oSheet = new Spreadsheet({
+                workbook: { columns: aCols },
                 dataSource: aData,
                 fileName: "Account_Copy_Results.xlsx"
-            };
-
-            var oSheet = new Spreadsheet(oSettings);
-            oSheet.build().finally(function () {
-                oSheet.destroy();
             });
+
+            oSheet.build()
+                .then(function () {
+                    if (fnCallback) fnCallback();
+                })
+                .finally(function () {
+                    oSheet.destroy();
+                });
         }
-    }
+    };
 });
